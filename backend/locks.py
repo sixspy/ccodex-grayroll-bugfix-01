@@ -12,17 +12,16 @@ router = APIRouter(prefix="/api/locks", tags=["locks"])
 TTL = 20.0
 
 
-def acquire(conn, key: str, holder: str, detail: str = "发布锁争用，请稍后重试") -> None:
+def acquire(conn, key: str, holder: str) -> None:
     now = time.time()
     row = conn.execute("SELECT * FROM row_locks WHERE lock_key=?", (key,)).fetchone()
     if row and row["expires_at"] > now and row["holder"] != holder:
-        # 争用核销第一段：败方只记争用痕，不做任何正式写
         conn.execute(
             "INSERT INTO contention_marks(lock_key, loser, winner, created_at) VALUES(?,?,?,?)",
             (key, holder, row["holder"], now),
         )
         conn.commit()
-        raise HTTPException(409, detail=detail)
+        raise HTTPException(409, detail="发布锁争用，请稍后重试")
     conn.execute(
         "INSERT INTO row_locks(lock_key, holder, expires_at) VALUES(?,?,?) "
         "ON CONFLICT(lock_key) DO UPDATE SET holder=excluded.holder, expires_at=excluded.expires_at",

@@ -25,23 +25,9 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
     env_code = require_str(body.env_code, "环境", 2)
     subject = require_str(body.subject_key, "主体键", 1)
     with connect() as conn:
-        # grayroll-bugfix-01：开关键唯一与求值索引跨表联查（flags × flag_rules）。
-        # 同 key 出现多正式行即歧义，禁止 fetchone 静默取一行制造齐套假绿，直接拒决。
-        dup = conn.execute(
-            """
-            SELECT f.id, COUNT(r.id) AS rule_cnt
-            FROM flags f
-            LEFT JOIN flag_rules r ON r.flag_id=f.id AND r.official=1
-            WHERE f.key=?
-            GROUP BY f.id
-            """,
-            (flag_key,),
-        ).fetchall()
-        if not dup:
-            raise HTTPException(404, detail="开关不存在")
-        if len(dup) > 1:
-            raise HTTPException(409, detail="开关键撞键歧义：存在多行正式开关，已拒决求值，请先核销撞键")
         fl = conn.execute("SELECT * FROM flags WHERE key=?", (flag_key,)).fetchone()
+        if not fl:
+            raise HTTPException(404, detail="开关不存在")
         env = conn.execute("SELECT * FROM environments WHERE code=?", (env_code,)).fetchone()
         if not env:
             raise HTTPException(404, detail="环境不存在")
@@ -133,11 +119,4 @@ def eval_board(authorization: str | None = Header(default=None)):
             dict(x)
             for x in conn.execute("SELECT status, COUNT(*) c FROM flags GROUP BY status").fetchall()
         ]
-        # grayroll-bugfix-01：撞键告警随总览板同源下发，五页共用同一判据
-        collisions = [
-            dict(x)
-            for x in conn.execute(
-                "SELECT key, COUNT(*) AS c FROM flags GROUP BY key HAVING COUNT(*) > 1 ORDER BY key"
-            ).fetchall()
-        ]
-    return {"rules": rows, "by_status": by_status, "collisions": collisions}
+    return {"rules": rows, "by_status": by_status}

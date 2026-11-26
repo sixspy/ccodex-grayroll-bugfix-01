@@ -64,11 +64,6 @@ def publish(body: PublishIn, authorization: str | None = Header(default=None)):
             fl = conn.execute("SELECT * FROM flags WHERE id=?", (fid,)).fetchone()
             if not fl:
                 raise HTTPException(404, detail="开关不存在")
-            # grayroll-bugfix-01：发布写口与求值索引同判据，撞键歧义开关禁止正式发布
-            if conn.execute(
-                "SELECT COUNT(*) FROM flags WHERE key=?", (fl["key"],)
-            ).fetchone()[0] > 1:
-                raise HTTPException(409, detail="开关键撞键歧义，禁止发布，请先核销撞键")
             assert_flag_publishable(fl["status"])
             assert_not_killed_or_allow_kill(fl["status"])
             if not conn.execute("SELECT 1 FROM environments WHERE id=?", (eid,)).fetchone():
@@ -131,13 +126,6 @@ def promote_release_shadow(shadow_id: int, authorization: str | None = Header(de
         acquire(conn, key, user["username"])
         try:
             fl = conn.execute("SELECT * FROM flags WHERE id=?", (fid,)).fetchone()
-            # grayroll-bugfix-01：影子升正同样拦住撞键歧义，命运取舍与正式发布同源
-            if not fl:
-                raise HTTPException(404, detail="开关不存在")
-            if conn.execute(
-                "SELECT COUNT(*) FROM flags WHERE key=?", (fl["key"],)
-            ).fetchone()[0] > 1:
-                raise HTTPException(409, detail="开关键撞键歧义，禁止影子升正，请先核销撞键")
             assert_flag_publishable(fl["status"])
             assert_not_killed_or_allow_kill(fl["status"])
             now = time.time()
