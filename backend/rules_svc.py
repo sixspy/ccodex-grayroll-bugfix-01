@@ -24,6 +24,140 @@ class ShadowBindIn(BaseModel):
     cohort_id: int | None = None
 
 
+def env_rule_audit(conn) -> dict:
+    """环境编码唯一性 × 规则外键挂接的联查账。
+
+    甲口径下正式环境册一个编码只能有一行；若历史脏库出现同码双行，
+    不能按 code 折叠后把分裂挂接误判成『齐套/绿』。本函数给出：
+    - consistent：账实是否相符（无同码双行、无孤儿规则）
+    - complete：每个未归档开关 × 每个环境编码是否恰有一条 canonical 正式规则
+    - green：consistent 且 complete 且无歧义挂接（任何双行都不许报绿）
+    """
+    env_rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, code, title, risk_level FROM environments ORDER BY id"
+        ).fetchall()
+    ]
+    ids_by_code: dict[str, list[int]] = {}
+    for e in env_rows:
+        ids_by_code.setdefault(e["code"], []).append(e["id"])
+
+    duplicate_codes = []
+    canonical_by_code: dict[str, int] = {}
+    for code, ids in ids_by_code.items():
+        ordered = sorted(ids)
+        canonical_by_code[code] = ordered[0]
+        if len(ordered) > 1:
+            duplicate_codes.append(
+                {
+                    "code": code,
+                    "env_ids": ordered,
+                    "canonical_id": ordered[0],
+                    "extra_ids": ordered[1:],
+                }
+            )
+
+    rule_rows = [
+        dict(r)
+        for r in conn.execute(
+            """
+            SELECT r.id, r.flag_id, r.env_id, r.official, r.version,
+                   f.key AS flag_key, f.status AS flag_status, e.code AS env_code
+            FROM flag_rules r
+            JOIN flags f ON f.id = r.flag_id
+            LEFT JOIN environments e ON e.id = r.env_id
+            ORDER BY r.id
+            """
+        ).fetchall()
+    ]
+    live_env_ids = {e["id"] for e in env_rows}
+    orphan_rule_ids = [r["id"] for r in rule_rows if r["env_id"] not in live_env_ids]
+
+    flags = [
+        dict(r)
+        for r in conn.execute("SELECT id, key, status FROM flags ORDER BY id").fetchall()
+    ]
+    codes = sorted(ids_by_code.keys())
+    coverage = []
+    all_covered = True
+    any_ambiguous = False
+    for f in flags:
+        if f["status"] == "archived":
+            continue
+        for code in codes:
+            code_env_ids = set(ids_by_code[code])
+            canonical = canonical_by_code[code]
+            official_cell = [
+                r
+                for r in rule_rows
+                if r["flag_id"] == f["id"]
+                and r["official"] == 1
+                and r["env_id"] in code_env_ids
+            ]
+            canonical_rules = [r for r in official_cell if r["env_id"] == canonical]
+            extra_rules = [r for r in official_cell if r["env_id"] != canonical]
+            multi_canonical = len(canonical_rules) > 1
+            # 双行编码下只要规则落在多行上即为挂接歧义；canonical 多条同样歧义。
+            ambiguous = multi_canonical or (
+                len(ids_by_code[code]) > 1 and len(official_cell) > 0
+            )
+            covered = len(canonical_rules) == 1
+            if not covered:
+                all_covered = False
+            if ambiguous:
+                any_ambiguous = True
+            coverage.append(
+                {
+                    "flag_id": f["id"],
+                    "flag_key": f["key"],
+                    "env_code": code,
+                    "canonical_env_id": canonical,
+                    "rule_count": len(official_cell),
+                    "canonical_rule_count": len(canonical_rules),
+                    "misattached_rule_count": len(extra_rules),
+                    "covered": covered,
+                    "ambiguous": ambiguous,
+                }
+            )
+
+    consistent = not duplicate_codes and not orphan_rule_ids
+    complete = bool(coverage) and all_covered
+    green = consistent and complete and not any_ambiguous
+    collisions = [
+        {
+            "code": d["code"],
+            "env_code": d["code"],
+            "c": len(d["env_ids"]),
+            "env_ids": d["env_ids"],
+            "canonical_id": d["canonical_id"],
+        }
+        for d in duplicate_codes
+    ]
+    return {
+        "consistent": consistent,
+        "complete": complete,
+        "green": green,
+        "ok": consistent,
+        "env_total": len(env_rows),
+        "env_code_count": len(codes),
+        "duplicate_codes": duplicate_codes,
+        "collisions": collisions,
+        "orphan_rule_ids": orphan_rule_ids,
+        "coverage": coverage,
+    }
+
+
+@router.get("/completeness")
+@router.get("/coverage")
+@router.get("/audit")
+def rule_completeness(authorization: str | None = Header(default=None)):
+    """环境编码唯一 × 规则外键挂接齐套核对（双行环境不得假绿）。"""
+    current_user(authorization)
+    with connect() as conn:
+        return env_rule_audit(conn)
+
+
 @router.get("")
 def list_rules(authorization: str | None = Header(default=None)):
     current_user(authorization)
@@ -47,7 +181,13 @@ def list_rules(authorization: str | None = Header(default=None)):
                 "SELECT * FROM rule_shadows ORDER BY id DESC"
             ).fetchall()
         ]
-    return {"official": official, "shadows": shadows}
+        audit = env_rule_audit(conn)
+    return {
+        "official": official,
+        "shadows": shadows,
+        "audit": audit,
+        "collisions": audit["collisions"],
+    }
 
 
 @router.post("/shadow-bind")

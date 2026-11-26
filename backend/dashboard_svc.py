@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header
 from auth import current_user
 from db import connect
 from models import FLAG_STATUS_LABEL
+from rules_svc import env_rule_audit
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -22,6 +23,7 @@ def dashboard(authorization: str | None = Header(default=None)):
             "SELECT COUNT(*) c FROM release_shadows WHERE status='open'"
         ).fetchone()["c"]
         overrides = conn.execute("SELECT COUNT(*) c FROM overrides WHERE active=1").fetchone()["c"]
+        env_audit = env_rule_audit(conn)
         by_status = [
             {
                 "status": r["status"],
@@ -43,6 +45,9 @@ def dashboard(authorization: str | None = Header(default=None)):
         "releases": releases,
         "open_shadows": shadows,
         "active_overrides": overrides,
+        "env_consistent": env_audit["consistent"],
+        "env_green": env_audit["green"],
+        "env_duplicate_codes": env_audit["duplicate_codes"],
         "by_status": by_status,
         "recent": recent,
     }
