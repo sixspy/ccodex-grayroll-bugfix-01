@@ -7,6 +7,7 @@ export const EvaluateView = {
     async function reloadBoard() { board.value = await api("/api/evaluate/board"); }
     async function run() {
       err.value = "";
+      result.value = null;  // 出错即清旧结果，杜绝双行歧义下残留 enabled 假绿
       try { result.value = await api("/api/evaluate", { method: "POST", body: JSON.stringify(form.value) }); }
       catch (e) { err.value = e.message || String(e); }
     }
@@ -28,6 +29,9 @@ export const EvaluateView = {
     </div>
     <div class="panel span-7">
       <h2>正式规则板</h2>
+      <div class="err" v-if="board && board.collisions && board.collisions.length" style="margin-bottom:0.6rem">
+        撞键告警（求值已拒决假绿）：<span v-for="c in board.collisions" :key="c.key"><code>{{ c.key }}</code> × {{ c.c }} 行；</span>
+      </div>
       <table v-if="board">
         <thead><tr><th>开关</th><th>环境</th><th>类型</th><th>%</th><th>版本</th></tr></thead>
         <tbody>
